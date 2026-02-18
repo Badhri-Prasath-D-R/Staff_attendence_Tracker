@@ -1,3 +1,6 @@
 streamlit
+pymongo
 pymupdf
 pandas
+fpdf2
+certifi

@@ -3,56 +3,63 @@ import fitz
 import pandas as pd
 from datetime import datetime, timedelta
 import re
-import hashlib
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
-from reportlab.lib import colors
-import io
+from pymongo import MongoClient
+from bson.objectid import ObjectId
+from fpdf import FPDF
+from fpdf.enums import XPos, YPos
+import certifi
 
-st.set_page_config(page_title="Attendance Tracker", page_icon="📅", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Attendance Tracker Pro", page_icon="📅", layout="wide")
 
-# ===== YOUR ORIGINAL CSS =====
+# --- DATABASE CONNECTION (Cached with SSL Fix) ---
+@st.cache_resource
+def get_mongodb_connection():
+    uri = "mongodb+srv://badhriprasathdr_db_user:H2Jm044LSmpRNfP0@cluster0.ko8iccx.mongodb.net/?appName=Cluster0"
+    # tlsCAFile=certifi.where() solves the SSL handshake/cryptography errors
+    client = MongoClient(uri, tlsCAFile=certifi.where())
+    return client
+
+client = get_mongodb_connection()
+db = client.AttendanceDB
+collection = db.employee_records
+
+# --- PROFESSIONAL UI STYLING ---
 st.markdown("""
-<style>
-[data-testid="stMetricValue"] { color: #1f77b4 !important; font-weight: bold; }
-[data-testid="stMetricLabel"] { color: #31333F !important; font-size: 1.1rem !important; }
-.stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e0e0e0; }
-</style>
-""", unsafe_allow_html=True)
+    <style>
+    [data-testid="stMetricValue"] { color: #004085 !important; font-weight: bold !important; }
+    [data-testid="stMetricLabel"] { color: #333333 !important; }
+    [data-testid="stMetric"] {
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 12px;
+        border: 1px solid #dee2e6;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
+    }
+    div.row-widget.stRadio > div {
+        flex-direction: row;
+        justify-content: center;
+        background: #e9ecef;
+        padding: 10px;
+        border-radius: 50px;
+        margin-bottom: 20px;
+    }
+    .stButton button { border-radius: 8px; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# ---------- NAVBAR ----------
-page = st.radio("Navigation",
-                ["📊 Attendance Dashboard", "📄 CoE Monthly Summary"],
-                horizontal=True)
-
-# ---------- HELPERS ----------
+# --- HELPER FUNCTIONS ---
 def format_td(td):
     total_sec = int(td.total_seconds())
-    if total_sec <= 0:
-        return "00:00"
+    if total_sec <= 0: return "00:00"
     return f"{total_sec // 3600:02d}:{(total_sec % 3600) // 60:02d}"
 
-def dataframe_to_pdf(df):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    data = [df.columns.tolist()] + df.values.tolist()
-    table = Table(data)
-    table.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),colors.grey),
-        ("TEXTCOLOR",(0,0),(-1,0),colors.whitesmoke),
-        ("GRID",(0,0),(-1,-1),1,colors.black)
-    ]))
-    doc.build([table])
-    buffer.seek(0)
-    return buffer
-
-# ---------- PROCESS PDF ----------
 def process_pdf(uploaded_file, gender):
     STD_WEEKDAY_MALE = timedelta(hours=9, minutes=10)
     STD_WEEKDAY_FEMALE = timedelta(hours=8, minutes=25)
     STD_SATURDAY = timedelta(hours=7, minutes=10)
     current_std_weekday = STD_WEEKDAY_MALE if gender == "Male" else STD_WEEKDAY_FEMALE
-
+    
     pdf_stream = uploaded_file.read()
     doc = fitz.open(stream=pdf_stream, filetype="pdf")
     text = "".join([page.get_text() for page in doc])
@@ -60,10 +67,8 @@ def process_pdf(uploaded_file, gender):
 
     emp_info = {}
     for line in text.split('\n'):
-        if "Employee Name" in line:
-            emp_info['Name'] = line.split(":")[-1].strip()
-        if "Employee Code" in line:
-            emp_info['Code'] = line.split(":")[-1].strip()
+        if "Employee Name" in line: emp_info['Name'] = line.split(":")[-1].strip()
+        if "Employee Code" in line: emp_info['Code'] = line.split(":")[-1].strip()
 
     processed_data = []
     total_extra_sec = 0
@@ -71,101 +76,158 @@ def process_pdf(uploaded_file, gender):
     lines = text.split('\n')
 
     for i, line in enumerate(lines):
-        date_match = re.search(r'(\d{2}/\d{2}/2025)', line)
+        date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
         if date_match:
             date_str = date_match.group(1)
-            context = " ".join(lines[i:i+10])
+            context = " ".join(lines[i:i+10]) 
             day_match = re.search(r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun)', context)
-            if not day_match:
-                continue
-
+            if not day_match: continue
+            
             day_str = day_match.group(1)
             is_absent = "AB" in context[:50]
             in_time, out_time = "-", "-"
             work_td, extra_td = timedelta(0), timedelta(0)
-
             time_match = re.search(r'(\d{2}:\d{2})\s+(\d{2}:\d{2})', context)
-
+            
             if time_match and not is_absent:
-                t1, t2 = [datetime.strptime(t, '%H:%M') for t in time_match.groups()]
+                t1_str, t2_str = time_match.groups()
+                t1 = datetime.strptime(t1_str, '%H:%M')
+                t2 = datetime.strptime(t2_str, '%H:%M')
                 in_t, out_t = (t1, t2) if t1 < t2 else (t2, t1)
                 in_time, out_time = in_t.strftime('%H:%M'), out_t.strftime('%H:%M')
                 work_td = out_t - in_t
+                
                 std = STD_SATURDAY if day_str == "Sat" else current_std_weekday
                 if work_td > std:
                     extra_td = work_td - std
                     total_extra_sec += extra_td.total_seconds()
 
-            if is_absent:
-                absent_count += 1
-
+            if is_absent: absent_count += 1
             processed_data.append({
-                "Date": date_str,
-                "Day": day_str,
-                "In": in_time,
-                "Out": out_time,
-                "Work": format_td(work_td),
-                "Extra": format_td(extra_td),
+                "Date": date_str, "Day": day_str, "In": in_time, "Out": out_time,
+                "Work": format_td(work_td), "Extra": format_td(extra_td),
                 "Status": "Absent" if is_absent else ("Present" if in_time != "-" else "Off/Holiday")
             })
 
-    earned_days = int(total_extra_sec // current_std_weekday.total_seconds())
+    divisor_seconds = current_std_weekday.total_seconds()
+    # 20-minute tolerance (1200 seconds) for earned leave calculation
+    earned_days = int((total_extra_sec + 1200) // divisor_seconds)
+    
     df = pd.DataFrame(processed_data).drop_duplicates(subset=['Date'])
     return emp_info, df, total_extra_sec, absent_count, earned_days
 
-def generate_coe_summary(emp_info, total_extra_sec, absent_count):
-    return pd.DataFrame([{
-        "CoE Faculty Name": f"{emp_info.get('Name')} - {emp_info.get('Code')}",
-        "Extra working hours": format_td(timedelta(seconds=total_extra_sec)),
-        "Work Nature": "CoE Work",
-        "Remarks": f"{absent_count} Absent Days"
-    }])
+# --- PERSISTENT SIDEBAR ---
+with st.sidebar:
+    st.header("🎛️ App Controls")
+    gender_input = st.selectbox("Employee Gender", ["Male", "Female"])
+    uploaded_file = st.file_uploader("Upload Attendance PDF", type="pdf")
+    st.divider()
 
-# ---------- SIDEBAR ----------
-gender_input = st.sidebar.selectbox("Select Gender", ["Male", "Female"])
-uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
+# --- MAIN PAGE NAVIGATION ---
+st.title("📅 Attendance Analytics Dashboard")
+choice = st.radio("Navigation", ["📊 Calculator", "📂 Records History"], horizontal=True)
 
-# ================= PAGE 1 =================
-if page == "📊 Attendance Dashboard":
-    st.title("📊 Attendance Dashboard")
-
+# --- CALCULATOR VIEW ---
+if choice == "📊 Calculator":
     if uploaded_file:
         info, df, extra_sec, absents, earned_days = process_pdf(uploaded_file, gender_input)
-
-        st.subheader(f"Employee: {info.get('Name')} ({info.get('Code')})")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Extra Time", format_td(timedelta(seconds=extra_sec)))
-        col2.metric("Earned Leave Days", f"{earned_days} Days")
-        col3.metric("Absents", absents)
+        
+        st.markdown(f"### 👤 Profile: **{info.get('Name', 'N/A')}** (`{info.get('Code', 'N/A')}`)")
+        
+        m1, m2, m3 = st.columns(3)
+        extra_time_str = format_td(timedelta(seconds=extra_sec))
+        m1.metric("Total Extra Time", extra_time_str)
+        m2.metric("Earned Leave", f"{earned_days} Days")
+        m3.metric("Absents", absents)
+        
+        if st.button("💾 Save Record to Database", use_container_width=True):
+            record = {
+                "name": info.get('Name', 'N/A'),
+                "code": info.get('Code', 'N/A'),
+                "extra_time": extra_time_str,
+                "earned_days": earned_days,
+                "absents": absents,
+                "save_date": datetime.now().strftime("%Y-%m-%d %H:%M")
+            }
+            collection.insert_one(record)
+            st.success("✅ Record Successfully Saved!")
 
         st.divider()
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        with st.expander("🔍 View Detailed Daily Breakdown Table", expanded=False):
+            st.dataframe(df, width="stretch", hide_index=True)
+    else:
+        st.warning("👈 Please upload a PDF file from the sidebar to begin.")
 
-# ================= PAGE 2 =================
-if page == "📄 CoE Monthly Summary":
-    st.title("📄 CoE Monthly Summary")
+# --- HISTORY VIEW ---
+else:
+    st.header("📂 Saved Database Records")
+    try:
+        data = list(collection.find())
+    except Exception as e:
+        st.error(f"Database connection error: {e}")
+        data = []
 
-    if uploaded_file:
-        file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+    if data:
+        c1, c2, _ = st.columns([1, 1, 1])
+        with c1:
+            if st.button("📄 Export Professional PDF", use_container_width=True):
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Helvetica", 'B', 14)
+                pdf.cell(0, 10, "CoE - Monthly Biometric Summary", align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                pdf.ln(5)
+                
+                pdf.set_font("Helvetica", 'B', 9)
+                # Expanded Table Structure: 5 Columns
+                w = [65, 35, 35, 25, 25] 
+                cols = ["CoE Faculty Name", "Extra Hours", "Work Nature", "Earned", "Absents"]
+                
+                for i, col in enumerate(cols):
+                    nxt_x = XPos.LMARGIN if i == len(cols)-1 else XPos.RIGHT
+                    nxt_y = YPos.NEXT if i == len(cols)-1 else YPos.TOP
+                    pdf.cell(w[i], 10, col, border=1, align='C', new_x=nxt_x, new_y=nxt_y)
+                
+                pdf.set_font("Helvetica", '', 9)
+                for item in data:
+                    faculty_display = f"{item.get('name', 'N/A')} - {item.get('code', 'N/A')}"
+                    pdf.cell(w[0], 10, faculty_display, border=1, align='L', new_x=XPos.RIGHT, new_y=YPos.TOP)
+                    pdf.cell(w[1], 10, str(item.get('extra_time', '00:00')), border=1, align='C', new_x=XPos.RIGHT, new_y=YPos.TOP)
+                    pdf.cell(w[2], 10, "CoE Work", border=1, align='C', new_x=XPos.RIGHT, new_y=YPos.TOP)
+                    
+                    # Column 4: Earned Days
+                    e_days = item.get('earned_days', 0)
+                    e_display = str(e_days) if e_days != 0 else "-"
+                    pdf.cell(w[3], 10, e_display, border=1, align='C', new_x=XPos.RIGHT, new_y=YPos.TOP)
 
-        if "last_file_hash" not in st.session_state:
-            st.session_state.last_file_hash = None
+                    # Column 5: Absents
+                    abs_count = item.get('absents', 0)
+                    abs_display = str(abs_count) if abs_count != 0 else "-"
+                    pdf.cell(w[4], 10, abs_display, border=1, align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                
+                st.download_button("📥 Click to Download PDF", data=bytes(pdf.output()), file_name="CoE_Detailed_Report.pdf", mime="application/pdf")
+        
+        with c2:
+             if st.button("🔥 Wipe All Data", use_container_width=True):
+                collection.delete_many({})
+                st.rerun()
 
-        if st.session_state.last_file_hash != file_hash:
-            info, df, extra_sec, absents, earned_days = process_pdf(uploaded_file, gender_input)
-            st.session_state.summary_df = generate_coe_summary(info, extra_sec, absents)
-            st.session_state.last_file_hash = file_hash
+        st.divider()
 
-        st.dataframe(st.session_state.summary_df, use_container_width=True)
-
-        if len(st.session_state.summary_df) > 0:
-            row_index = st.number_input("Row index to delete",0,len(st.session_state.summary_df)-1,0)
-
-            col1, col2 = st.columns(2)
-
-            if col1.button("🗑 Delete Row"):
-                st.session_state.summary_df = st.session_state.summary_df.drop(index=row_index).reset_index(drop=True)
-                st.success("Row deleted!")
-
-            pdf_buffer = dataframe_to_pdf(st.session_state.summary_df)
-            col2.download_button("📥 Export as PDF", pdf_buffer, "CoE_Summary.pdf", "application/pdf")
+        for item in data:
+            with st.container():
+                r1, r2 = st.columns([0.92, 0.08])
+                with r1:
+                    name = item.get('name', 'N/A')
+                    code = item.get('code', 'N/A')
+                    extra = item.get('extra_time', '00:00')
+                    leave = item.get('earned_days', 0)
+                    absent = item.get('absents', 0)
+                    date = item.get('save_date', 'Unknown')
+                    st.markdown(f"**{name}** ({code})  \n`Extra: {extra}` | `Leave: {leave}d` | `Absents: {absent}` | _Saved: {date}_")
+                with r2:
+                    if st.button("🗑️", key=str(item['_id'])):
+                        collection.delete_one({"_id": item['_id']})
+                        st.rerun()
+                st.markdown("---")
+    else:
+        st.info("No records found.")

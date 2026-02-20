@@ -16,7 +16,7 @@ st.set_page_config(page_title="Attendance Tracker Pro", page_icon="📅", layout
 @st.cache_resource
 def get_mongodb_connection():
     uri = "mongodb+srv://badhriprasathdr_db_user:H2Jm044LSmpRNfP0@cluster0.ko8iccx.mongodb.net/?appName=Cluster0"
-    # tlsCAFile=certifi.where() solves the SSL handshake/cryptography errors
+    # tlsCAFile=certifi.where() solves SSL handshake errors in cloud environments
     client = MongoClient(uri, tlsCAFile=certifi.where())
     return client
 
@@ -79,6 +79,7 @@ def process_pdf(uploaded_file, gender):
         date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
         if date_match:
             date_str = date_match.group(1)
+            # Capture context for times and day
             context = " ".join(lines[i:i+10]) 
             day_match = re.search(r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun)', context)
             if not day_match: continue
@@ -87,20 +88,23 @@ def process_pdf(uploaded_file, gender):
             is_absent = "AB" in context[:50]
             in_time, out_time = "-", "-"
             work_td, extra_td = timedelta(0), timedelta(0)
-            time_match = re.search(r'(\d{2}:\d{2})\s+(\d{2}:\d{2})', context)
             
-            if time_match and not is_absent:
-                t1_str, t2_str = time_match.groups()
-                t1 = datetime.strptime(t1_str, '%H:%M')
-                t2 = datetime.strptime(t2_str, '%H:%M')
-                in_t, out_t = (t1, t2) if t1 < t2 else (t2, t1)
-                in_time, out_time = in_t.strftime('%H:%M'), out_t.strftime('%H:%M')
-                work_td = out_t - in_t
+            # Updated logic: Extract all timestamps to find earliest and latest
+            all_times = re.findall(r'(\d{2}:\d{2})', context[:100])
+            
+            if all_times and not is_absent:
+                time_objs = [datetime.strptime(t, '%H:%M') for t in all_times]
+                in_t = min(time_objs)
+                out_t = max(time_objs)
                 
-                std = STD_SATURDAY if day_str == "Sat" else current_std_weekday
-                if work_td > std:
-                    extra_td = work_td - std
-                    total_extra_sec += extra_td.total_seconds()
+                if in_t != out_t:
+                    in_time, out_time = in_t.strftime('%H:%M'), out_t.strftime('%H:%M')
+                    work_td = out_t - in_t
+                    
+                    std = STD_SATURDAY if day_str == "Sat" else current_std_weekday
+                    if work_td > std:
+                        extra_td = work_td - std
+                        total_extra_sec += extra_td.total_seconds()
 
             if is_absent: absent_count += 1
             processed_data.append({
@@ -178,7 +182,7 @@ else:
                 pdf.ln(5)
                 
                 pdf.set_font("Helvetica", 'B', 9)
-                # Expanded Table Structure: 5 Columns
+                # 5 Column widths to accommodate Absents
                 w = [65, 35, 35, 25, 25] 
                 cols = ["CoE Faculty Name", "Extra Hours", "Work Nature", "Earned", "Absents"]
                 
@@ -194,12 +198,10 @@ else:
                     pdf.cell(w[1], 10, str(item.get('extra_time', '00:00')), border=1, align='C', new_x=XPos.RIGHT, new_y=YPos.TOP)
                     pdf.cell(w[2], 10, "CoE Work", border=1, align='C', new_x=XPos.RIGHT, new_y=YPos.TOP)
                     
-                    # Column 4: Earned Days
                     e_days = item.get('earned_days', 0)
                     e_display = str(e_days) if e_days != 0 else "-"
                     pdf.cell(w[3], 10, e_display, border=1, align='C', new_x=XPos.RIGHT, new_y=YPos.TOP)
 
-                    # Column 5: Absents
                     abs_count = item.get('absents', 0)
                     abs_display = str(abs_count) if abs_count != 0 else "-"
                     pdf.cell(w[4], 10, abs_display, border=1, align='C', new_x=XPos.LMARGIN, new_y=YPos.NEXT)

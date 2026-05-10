@@ -8,11 +8,16 @@ from bson.objectid import ObjectId
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 import certifi
+import dotenv
+import os
+
+dotenv.load_dotenv()
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Attendance Tracker Pro", page_icon="📅", layout="wide")
 
 # --- DATABASE CONNECTION (Cached with SSL Fix) ---
+URI = os.environ["MONGODB_URI"]
 @st.cache_resource
 def get_mongodb_connection():
     uri = "mongodb+srv://badhriprasathdr_db_user:H2Jm044LSmpRNfP0@cluster0.ko8iccx.mongodb.net/?appName=Cluster0"
@@ -79,24 +84,25 @@ def process_pdf(uploaded_file, gender):
         date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
         if date_match:
             date_str = date_match.group(1)
-            # Capture context for times and day
+            # Capture context for times, day, and "AB" flags
             context = " ".join(lines[i:i+10]) 
             day_match = re.search(r'(Mon|Tue|Wed|Thu|Fri|Sat|Sun)', context)
             if not day_match: continue
             
             day_str = day_match.group(1)
-            is_absent = "AB" in context[:50]
+            
+            # 1. Look for all timestamps in the context
+            all_times = re.findall(r'(\d{2}:\d{2})', context[:100])
+            
             in_time, out_time = "-", "-"
             work_td, extra_td = timedelta(0), timedelta(0)
             
-            # Updated logic: Extract all timestamps to find earliest and latest
-            all_times = re.findall(r'(\d{2}:\d{2})', context[:100])
-            
-            if all_times and not is_absent:
+            if all_times:
                 time_objs = [datetime.strptime(t, '%H:%M') for t in all_times]
                 in_t = min(time_objs)
                 out_t = max(time_objs)
                 
+                # If there's at least two distinct times OR a significant time span
                 if in_t != out_t:
                     in_time, out_time = in_t.strftime('%H:%M'), out_t.strftime('%H:%M')
                     work_td = out_t - in_t
@@ -106,11 +112,20 @@ def process_pdf(uploaded_file, gender):
                         extra_td = work_td - std
                         total_extra_sec += extra_td.total_seconds()
 
-            if is_absent: absent_count += 1
+            # 2. STATUS LOGIC: prioritized to handle "AB" with times
+            # If punch times exist, they are "Present" regardless of the "AB" text
+            if in_time != "-":
+                final_status = "Present"
+            elif "AB" in context[:50]:
+                final_status = "Absent"
+                absent_count += 1
+            else:
+                final_status = "Off/Holiday"
+
             processed_data.append({
                 "Date": date_str, "Day": day_str, "In": in_time, "Out": out_time,
                 "Work": format_td(work_td), "Extra": format_td(extra_td),
-                "Status": "Absent" if is_absent else ("Present" if in_time != "-" else "Off/Holiday")
+                "Status": final_status
             })
 
     divisor_seconds = current_std_weekday.total_seconds()
@@ -182,7 +197,6 @@ else:
                 pdf.ln(5)
                 
                 pdf.set_font("Helvetica", 'B', 9)
-                # 5 Column widths to accommodate Absents
                 w = [65, 35, 35, 25, 25] 
                 cols = ["CoE Faculty Name", "Extra Hours", "Work Nature", "Earned", "Absents"]
                 

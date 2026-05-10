@@ -17,10 +17,10 @@ dotenv.load_dotenv()
 st.set_page_config(page_title="Attendance Tracker Pro", page_icon="📅", layout="wide")
 
 # --- DATABASE CONNECTION (Cached with SSL Fix) ---
-URI = os.environ["MONGODB_URI"]
+URI = st.secrets["MONGO_URI"]
 @st.cache_resource
 def get_mongodb_connection():
-    uri = "mongodb+srv://badhriprasathdr_db_user:H2Jm044LSmpRNfP0@cluster0.ko8iccx.mongodb.net/?appName=Cluster0"
+    uri = URI
     # tlsCAFile=certifi.where() solves SSL handshake errors in cloud environments
     client = MongoClient(uri, tlsCAFile=certifi.where())
     return client
